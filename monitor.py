@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import json
@@ -95,11 +96,72 @@ def fetch_event_info(client, event_id):
         }
 
 
+ADDON_KEYWORDS = re.compile(
+    r"parking|car pass|camping pass|live.in.vehicle|merch|locker|shuttle|bus",
+    re.IGNORECASE,
+)
+
+ONSALE_BLOCK_RE = re.compile(
+    r'<li\s+class="onsale\s+but".*?</li>', re.DOTALL
+)
+
+CLOSED_BLOCK_RE = re.compile(
+    r'<li\s+class="closed".*?</li>', re.DOTALL
+)
+
+LABEL_TEXT_RE = re.compile(
+    r'<div\s+class="pr8">(.*?)</div>', re.DOTALL
+)
+
+ONSALE_PRICE_RE = re.compile(r'data-price="([\d.]+)"')
+CLOSED_PRICE_RE = re.compile(r'class="type-price">(?:&#\d+;|[^\d])*([\d,.]+)')
+
+
+def _extract_closed_prices(html):
+    prices = []
+    for block in CLOSED_BLOCK_RE.findall(html):
+        m = CLOSED_PRICE_RE.search(block)
+        if m:
+            prices.append(float(m.group(1).replace(",", "")))
+    return prices
+
+
 def check_tickets(client, event_id):
     url = WIDGET_URL.format(event_id=event_id)
     resp = client.get(url, headers=random_headers(), timeout=10)
     resp.raise_for_status()
-    return "onsale" in resp.text.lower()
+
+    html = resp.text
+    blocks = ONSALE_BLOCK_RE.findall(html)
+    if not blocks:
+        return []
+
+    closed_prices = _extract_closed_prices(html)
+    min_ticket_price = min(closed_prices) * 0.5 if closed_prices else 0
+    log.info(
+        "Closed tier prices: %s, min threshold: %.0f",
+        [f"£{p:.0f}" for p in closed_prices],
+        min_ticket_price,
+    )
+
+    tickets = []
+    for block in blocks:
+        label_match = LABEL_TEXT_RE.search(block)
+        label = label_match.group(1).strip() if label_match else "Unknown"
+        price_match = ONSALE_PRICE_RE.search(block)
+        price = float(price_match.group(1)) if price_match else 0
+
+        if ADDON_KEYWORDS.search(label):
+            log.info("Skipping add-on (name match): %s (£%.0f)", label, price)
+            continue
+
+        if closed_prices and price < min_ticket_price:
+            log.info("Skipping add-on (too cheap): %s (£%.0f < £%.0f threshold)", label, price, min_ticket_price)
+            continue
+
+        tickets.append({"label": label, "price": price})
+
+    return tickets
 
 
 def notify(client, topic, title, message, priority="high", tags="ticket", click_url=None):
@@ -192,21 +254,24 @@ def main():
                     continue
 
                 try:
-                    available = check_tickets(client, event["id"])
-                    if available:
+                    tickets = check_tickets(client, event["id"])
+                    if tickets:
+                        ticket_lines = "\n".join(
+                            f"  - {t['label']} (£{t['price']:.0f})" for t in tickets
+                        )
                         notify(
                             client, topic,
                             f"TICKETS AVAILABLE: {event['title']}",
                             f"{event['venue']}, {event['area']}\n"
-                            f"Date: {event['date']}\n"
-                            f"Artists: {event['artists']}\n\n"
+                            f"Date: {event['date']}\n\n"
+                            f"Tickets:\n{ticket_lines}\n\n"
                             f"BUY NOW: {event['url']}",
                             priority="urgent",
                             tags="rotating_light,ticket",
                             click_url=event["url"],
                         )
                         notified[event["id"]] = time.time()
-                        log.info("TICKETS FOUND for %s", event["title"])
+                        log.info("TICKETS FOUND for %s: %s", event["title"], tickets)
                     else:
                         log.info("No tickets for %s", event["title"])
 
