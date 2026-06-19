@@ -1,0 +1,37 @@
+name: RA Ticket Monitor
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore notification cache
+        uses: actions/cache@v4
+        with:
+          path: notified.json
+          key: ra-notified-events
+
+      - name: Run monitor
+        run: python monitor.py
+        env:
+          RA_EVENT_URLS: ${{ secrets.RA_EVENT_URLS }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+
+      - name: Save notification cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: notified.json
+          key: ra-notified-events
